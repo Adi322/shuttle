@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>FeTNA 2026 · Shuttle Tracker</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700;9..144,800&family=Hanken+Grotesk:wght@400;500;600;700&family=Noto+Sans+Tamil:wght@500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- Firebase (compat build = simple globals, no bundler needed) -->
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script>
+tailwind.config = { theme: { extend: {
+  colors: { maroon:"#6E1023", maroon2:"#8A1C2B", gold:"#C2902B", gold2:"#E3B23C",
+            cream:"#FBF5E9", ink:"#2A1216", sage:"#2E7D6F" },
+  fontFamily: { display:["Fraunces","Georgia","serif"], sans:["Hanken Grotesk","system-ui","sans-serif"], tamil:["Noto Sans Tamil","sans-serif"] },
+}}};
+</script>
+<style>
+  :root{ --maroon:#6E1023; --maroon2:#8A1C2B; --gold:#C2902B; --gold2:#E3B23C; --cream:#FBF5E9; --ink:#2A1216; }
+  *{ font-family:"Hanken Grotesk",system-ui,sans-serif; -webkit-tap-highlight-color:transparent; }
+  html,body{ height:100%; margin:0; }
+  body{ background:#FBF5E9; color:#2A1216;
+    background-image:radial-gradient(rgba(110,16,35,.05) 1.4px, transparent 1.4px); background-size:26px 26px; }
+  .disp{ font-family:"Fraunces",serif; }
+  .ta{ font-family:"Noto Sans Tamil",sans-serif; }
+  .leaflet-container{ font-family:"Hanken Grotesk"; background:#eee; }
+  .btn{ display:inline-flex; align-items:center; justify-content:center; gap:8px; font-weight:600; font-size:15px; padding:11px 18px; border-radius:12px; border:0; cursor:pointer; transition:all .18s ease; }
+  .btn-maroon{ background:var(--maroon); color:#fff; } .btn-maroon:hover{ background:var(--maroon2); }
+  .btn-gold{ background:var(--gold); color:#2A1216; } .btn-gold:hover{ background:var(--gold2); }
+  .btn-ghost{ background:#fff; color:var(--maroon); border:1.5px solid rgba(110,16,35,.25); } .btn-ghost:hover{ border-color:var(--maroon); }
+  .btn-stop{ background:#B42318; color:#fff; } .btn-stop:hover{ background:#912018; }
+  .btn:active{ transform:scale(.98); }
+  .card{ background:#fff; border:1px solid rgba(110,16,35,.10); border-radius:16px; box-shadow:0 1px 2px rgba(42,18,22,.05); }
+  .pill{ display:inline-flex; align-items:center; gap:5px; font-size:11.5px; font-weight:700; padding:3px 9px; border-radius:999px; letter-spacing:.02em; }
+  .chip{ font-size:13px; font-weight:600; padding:7px 14px; border-radius:999px; border:1.5px solid rgba(110,16,35,.18); background:#fff; color:#6b3b42; cursor:pointer; white-space:nowrap; transition:all .15s ease; }
+  .chip.on{ background:var(--maroon); color:#fff; border-color:var(--maroon); }
+  .field{ width:100%; border:1.5px solid rgba(110,16,35,.18); border-radius:12px; padding:12px 14px; font-size:16px; outline:none; background:#fff; }
+  .field:focus{ border-color:var(--gold); box-shadow:0 0 0 3px rgba(194,144,43,.18); }
+  .topband{ background:linear-gradient(100deg,#6E1023,#8A1C2B); }
+  .gold-rule{ height:3px; background:linear-gradient(90deg,transparent,var(--gold2),transparent); }
+  ::-webkit-scrollbar{ width:8px; height:8px; } ::-webkit-scrollbar-thumb{ background:rgba(110,16,35,.2); border-radius:8px; }
+  .veh-badge{ display:flex; align-items:center; gap:5px; padding:4px 9px; border-radius:999px; font-weight:800; font-size:12px; color:#fff; box-shadow:0 2px 8px rgba(0,0,0,.3); white-space:nowrap; border:2px solid #fff; }
+  .veh-badge.stale{ filter:grayscale(.85); opacity:.7; }
+  .pulse{ animation:pulse 2s ease-out infinite; } @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(46,125,111,.5)}70%{box-shadow:0 0 0 12px rgba(46,125,111,0)}100%{box-shadow:0 0 0 0 rgba(46,125,111,0)}}
+  .slidein{ animation:slidein .25s ease; } @keyframes slidein{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}
+  .glow{ box-shadow:0 0 0 3px rgba(227,178,60,.35); }
+</style>
+</head>
+<body>
+
+<div id="app"></div>
+<div id="toast-root" style="position:fixed;left:50%;bottom:90px;transform:translateX(-50%);z-index:3000;display:flex;flex-direction:column;gap:8px;align-items:center"></div>
+
+<script>
+/* ============================================================
+   FeTNA 2026 — SHUTTLE TRACKER
+   Single-file app · real GPS via Firebase · Leaflet map
+   ── EDIT THE CONFIG BELOW, then deploy to any HTTPS host ──
+   ============================================================ */
+
+/* 1) EVENT CONFIG ------------------------------------------------ */
+const CONFIG = {
+  eventName: "FeTNA 2026",
+  eventDates: "July 2–4, 2026",
+  hub: { name:"NJ Convention & Expo Center", lat:40.5188, lng:-74.3294 },
+  driverCode: "fetna26",     // simple gate so only drivers open the driver console
+  staleAfterSec: 30,         // mark a vehicle "last seen" after this many seconds of silence
+  writeIntervalMs: 3500,     // how often a driver phone pushes its location
+};
+
+/* 2) FIREBASE CONFIG  (paste yours from the Firebase console) ---- */
+const firebaseConfig = {
+  apiKey:            "PASTE_API_KEY",
+  authDomain:        "PASTE_PROJECT.firebaseapp.com",
+  databaseURL:       "https://PASTE_PROJECT-default-rtdb.firebaseio.com",
+  projectId:         "PASTE_PROJECT",
+  storageBucket:     "PASTE_PROJECT.appspot.com",
+  messagingSenderId: "PASTE_SENDER_ID",
+  appId:             "PASTE_APP_ID",
+};
+
+/* 3) ROUTES (edit freely once organizers confirm loops) --------- */
+const ROUTES = [
+  { id:"parking", name:"Parking Shuttle", ta:"வாகன நிறுத்தம்", color:"#6E1023" },
+  { id:"hotel",   name:"Hotel Shuttle",   ta:"விடுதி",        color:"#C2902B" },
+  { id:"venue",   name:"Venue Loop",      ta:"நிகழ்வு வளாகம்", color:"#2E7D6F" },
+];
+
+/* 4) STOPS (approx; adjust to real pickup points) --------------- */
+const STOPS = [
+  { name:"NJCEC Main Entrance", lat:40.5188, lng:-74.3294, route:"venue" },
+  { name:"Attendee Parking A",  lat:40.5225, lng:-74.3340, route:"parking" },
+  { name:"Attendee Parking B",  lat:40.5150, lng:-74.3250, route:"parking" },
+  { name:"Partner Hotel — Hilton", lat:40.5302, lng:-74.3401, route:"hotel" },
+  { name:"Partner Hotel — Marriott", lat:40.5095, lng:-74.3180, route:"hotel" },
+];
+
+/* 5) VEHICLES — 3 buses + 5 vans -------------------------------- */
+const VEHICLES = [
+  { id:"bus-1", label:"Bus 1", type:"bus", route:"parking" },
+  { id:"bus-2", label:"Bus 2", type:"bus", route:"parking" },
+  { id:"bus-3", label:"Bus 3", type:"bus", route:"hotel"   },
+  { id:"van-1", label:"Van 1", type:"van", route:"hotel"   },
+  { id:"van-2", label:"Van 2", type:"van", route:"hotel"   },
+  { id:"van-3", label:"Van 3", type:"van", route:"venue"   },
+  { id:"van-4", label:"Van 4", type:"van", route:"venue"   },
+  { id:"van-5", label:"Van 5", type:"van", route:"parking" },
+];
+
+/* ============================================================
+   Boot / state
+   ============================================================ */
+const $=(id)=>document.getElementById(id);
+const CONFIGURED = !firebaseConfig.apiKey.includes("PASTE") && !!window.firebase;
+let db=null;
+if(CONFIGURED){ try{ firebase.initializeApp(firebaseConfig); db=firebase.database(); }catch(e){ console.warn(e); } }
+
+const ROUTE=Object.fromEntries(ROUTES.map(r=>[r.id,r]));
+const COLOR={ bus:"#6E1023", van:"#C2902B" };
+
+// VEH = single source of truth for rendering (config seeded as offline, live data merged over it)
+const VEH={};
+VEHICLES.forEach(v=>VEH[v.id]={ ...v, lat:null, lng:null, heading:0, status:"offline", ts:0, driverName:"" });
+
+let lang = localStorage.getItem("fetna_lang") || "en";
+let routeFilter = "all";
+let demoTimer=null;
+
+/* i18n (English always present; toggle switches primary labels) */
+const T={
+  title:{en:"Shuttle Tracker", ta:"ஷட்டில் கண்காணிப்பு"},
+  riders:{en:"Riders", ta:"பயணிகள்"}, driver:{en:"Driver", ta:"ஓட்டுநர்"}, ops:{en:"Ops", ta:"நிர்வாகம்"},
+  live:{en:"LIVE", ta:"நேரலை"},
+  all:{en:"All", ta:"அனைத்தும்"}, buses:{en:"Buses", ta:"பேருந்துகள்"}, vans:{en:"Vans", ta:"வேன்கள்"},
+  in_service:{en:"In service", ta:"இயக்கத்தில்"}, on_break:{en:"On break", ta:"இடைவேளை"}, full:{en:"Full", ta:"நிரம்பியது"}, offline:{en:"Offline", ta:"இணைப்பில் இல்லை"},
+  lastseen:{en:"last seen", ta:"கடைசியாக"}, nearme:{en:"Shuttles near me", ta:"அருகில்"},
+  start:{en:"Start sharing location", ta:"இருப்பிடத்தைப் பகிர்"}, stop:{en:"Stop sharing", ta:"பகிர்வை நிறுத்து"},
+  pick:{en:"Select your vehicle", ta:"உங்கள் வாகனத்தைத் தேர்ந்தெடுக்கவும்"}, away:{en:"min away", ta:"நிமிடம்"},
+};
+const t=(k)=> (T[k]?.[lang]) || (T[k]?.en) || k;
+function setLang(l){ lang=l; localStorage.setItem("fetna_lang",l); render(); }
+
+/* toast */
+function toast(msg,kind="ok"){
+  const c={ok:"#2E7D6F",info:"#6E1023",warn:"#C2902B",err:"#B42318"}[kind]||"#2E7D6F";
+  const el=document.createElement("div");
+  el.className="slidein"; el.style.cssText="background:#2A1216;color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.3);border-left:4px solid "+c;
+  el.textContent=msg; $("toast-root").appendChild(el);
+  setTimeout(()=>{ el.style.transition="opacity .3s"; el.style.opacity="0"; setTimeout(()=>el.remove(),300); },2400);
+}
+
+/* utils */
+function ago(ts){ if(!ts) return "—"; const s=Math.round((Date.now()-ts)/1000); if(s<5)return "now"; if(s<60)return s+"s"; const m=Math.round(s/60); return m+"m"; }
+function isStale(v){ return !v.ts || (Date.now()-v.ts)/1000 > CONFIG.staleAfterSec; }
+function effStatus(v){ return isStale(v) ? "offline" : (v.status||"in_service"); }
+function statusStyle(s){ return {in_service:["#E4F2EE","#1F6E5E"],on_break:["#FBEFD7","#9A6B12"],full:["#FBE3E3","#B42318"],offline:["#ECE6DB","#7A6A5C"]}[s]||["#ECE6DB","#7A6A5C"]; }
+function statusLabel(s){ return {in_service:t("in_service"),on_break:t("on_break"),full:t("full"),offline:t("offline")}[s]||s; }
+function haversine(a,b,c,d){ const R=6371,dLat=(c-a)*Math.PI/180,dLng=(d-b)*Math.PI/180,la=a*Math.PI/180,lc=c*Math.PI/180; const x=Math.sin(dLat/2)**2+Math.sin(dLng/2)**2*Math.cos(la)*Math.cos(lc); return R*2*Math.asin(Math.sqrt(x)); }
+function vehSVG(type){ return type==="bus"
+  ? `<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="13" rx="2" fill="#fff"/><rect x="5" y="6" width="14" height="5" rx="1" fill="${'#6E1023'}"/><circle cx="7.5" cy="18.5" r="2" fill="#fff"/><circle cx="16.5" cy="18.5" r="2" fill="#fff"/></svg>`
+  : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 7h11l4 4v6H3z" fill="#fff"/><rect x="5" y="9" width="6" height="4" fill="${'#C2902B'}"/><circle cx="7.5" cy="18.5" r="2" fill="#fff"/><circle cx="16" cy="18.5" r="2" fill="#fff"/></svg>`; }
+
+/* ============================================================
+   Firebase live subscription
+   ============================================================ */
+if(db){
+  db.ref("vehicles").on("value",(snap)=>{
+    const data=snap.val()||{};
+    VEHICLES.forEach(cfg=>{
+      const live=data[cfg.id];
+      VEH[cfg.id] = live ? { ...cfg, ...live } : { ...VEH[cfg.id], ...cfg };
+    });
+    rerenderLive();
+  });
+}
+function pushVehicle(id, patch){
+  const rec={ ...VEH[id], ...patch, ts:Date.now() };
+  VEH[id]=rec;
+  if(db){ db.ref("vehicles/"+id).update(rec).catch(()=>{}); }
+  rerenderLive();
+}
+
+/* ============================================================
+   Shared chrome
+   ============================================================ */
+function tabbar(active){
+  const tab=(href,key,icon)=>`<a href="${href}" class="flex-1 flex flex-col items-center justify-center gap-0.5 py-2" style="color:${active===key?'#6E1023':'#9b8b80'}">
+    ${icon}<span class="text-[11px] font-bold ${lang==='ta'?'ta':''}">${t(key)}</span></a>`;
+  return `<nav class="fixed bottom-0 inset-x-0 z-[1200] bg-white/95 backdrop-blur border-t" style="border-color:rgba(110,16,35,.12)">
+    <div class="max-w-2xl mx-auto flex">
+      ${tab("#riders","riders",ic("users"))}
+      ${tab("#driver","driver",ic("steering"))}
+      ${tab("#ops","ops",ic("grid"))}
+    </div></nav>`;
+}
+function ic(n){
+  const m={
+    users:`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="8" r="3.2"/><path d="M3 20c0-3.3 2.7-5 6-5s6 1.7 6 5"/><path d="M16 6.5a3 3 0 010 5.5M21 20c0-2.5-1.5-4-3.5-4.6"/></svg>`,
+    steering:`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.4"/><path d="M3.2 11h6.4M14.4 11H20.8M12 14.4V20"/></svg>`,
+    grid:`<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>`,
+  };
+  return m[n]||"";
+}
+function header(sub){
+  return `<div class="topband text-white">
+    <div class="max-w-2xl mx-auto px-4 pt-3 pb-3 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style="background:rgba(255,255,255,.12);border:1px solid rgba(227,178,60,.5)">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 17l8-12 8 12z" fill="#E3B23C"/><circle cx="12" cy="14" r="2" fill="#6E1023"/></svg>
+        </div>
+        <div>
+          <p class="text-[11px] tracking-[.18em] font-bold" style="color:#E3B23C">${CONFIG.eventName} · ${CONFIG.eventDates}</p>
+          <h1 class="disp text-[20px] font-bold leading-tight">FeTNA <span class="${lang==='ta'?'ta':''}">${t("title")}</span></h1>
+        </div>
+      </div>
+      <button onclick="setLang('${lang==='en'?'ta':'en'}')" class="text-xs font-bold rounded-lg px-2.5 py-1.5" style="background:rgba(255,255,255,.14);border:1px solid rgba(227,178,60,.4)">${lang==='en'?'தமிழ்':'EN'}</button>
+    </div>
+    ${sub?`<div class="max-w-2xl mx-auto px-4 pb-2 -mt-1 text-[12.5px]" style="color:#f3dcc0">${sub}</div>`:""}
+    <div class="gold-rule"></div>
+  </div>`;
+}
+function modeBanner(){
+  if(CONFIGURED) return "";
+  return `<div class="max-w-2xl mx-auto px-4 mt-3"><div class="card p-3 flex items-start gap-3" style="border-color:rgba(194,144,43,.4);background:#FBEFD7">
+    <span class="text-xl">⚙️</span>
+    <div class="text-[13px]"><b>Demo mode.</b> Firebase isn't configured yet, so locations stay on this device only. Use Ops → “Simulate 8 shuttles” to demo. To go live across phones, paste your Firebase config in the file (see notes I'll give you).</div>
+  </div></div>`;
+}
+
+/* ============================================================
+   VIEW: RIDERS (public map)
+   ============================================================ */
+let map=null, markers={}, stopMarkers=[], userMarker=null, userLoc=null;
+function viewRiders(){
+  return `
+  ${header(lang==='ta'?'8 வாகனங்களின் நேரலை இருப்பிடம்':'Live location of all 8 shuttles')}
+  ${modeBanner()}
+  <div class="max-w-2xl mx-auto px-4 pt-3 pb-28">
+    <div class="flex gap-2 overflow-x-auto pb-1 -mx-1 px-1">
+      <button onclick="setFilter('all')" class="chip ${routeFilter==='all'?'on':''} ${lang==='ta'?'ta':''}">${t("all")}</button>
+      ${ROUTES.map(r=>`<button onclick="setFilter('${r.id}')" class="chip ${routeFilter===r.id?'on':''}"><span style="display:inline-block;width:9px;height:9px;border-radius:99px;background:${r.color};margin-right:5px"></span>${lang==='ta'?r.ta:r.name}</button>`).join("")}
+    </div>
+
+    <div class="card overflow-hidden mt-3" style="height:46vh;min-height:300px">
+      <div id="map" style="height:100%"></div>
+    </div>
+
+    <div class="flex items-center justify-between mt-4">
+      <h2 class="disp text-lg font-bold">${lang==='ta'?'வாகனங்கள்':'Shuttles'} <span id="veh-count" class="text-sm font-sans font-semibold" style="color:#9b8b80"></span></h2>
+      <button onclick="findNearMe()" class="btn btn-ghost py-2 text-[13px]">📍 ${t("nearme")}</button>
+    </div>
+    <div id="veh-list" class="mt-2 space-y-2"></div>
+  </div>
+  ${tabbar("riders")}`;
+}
+function setFilter(r){ routeFilter=r; renderVehList(); renderMarkers(); document.querySelectorAll(".chip").forEach(c=>{}); render(); }
+function initMap(){
+  const h=CONFIG.hub;
+  map=L.map("map",{zoomControl:true}).setView([h.lat,h.lng],14);
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",{maxZoom:20,attribution:"© OpenStreetMap © CARTO"}).addTo(map);
+  // hub marker
+  L.marker([h.lat,h.lng],{icon:L.divIcon({className:"",html:`<div style="display:flex;flex-direction:column;align-items:center"><div style="background:#2A1216;color:#E3B23C;font-weight:800;font-size:11px;padding:4px 9px;border-radius:8px;white-space:nowrap;border:1.5px solid #E3B23C">★ ${h.name}</div></div>`,iconAnchor:[60,12]})}).addTo(map);
+  // stops
+  stopMarkers=STOPS.map(s=>L.circleMarker([s.lat,s.lng],{radius:5,color:ROUTE[s.route]?.color||"#6E1023",fillColor:"#fff",fillOpacity:1,weight:2}).addTo(map).bindTooltip(s.name,{direction:"top"}));
+  markers={};
+  renderMarkers();
+  setTimeout(()=>map.invalidateSize(),200);
+}
+function vehVisible(v){ return routeFilter==="all" || v.route===routeFilter; }
+function renderMarkers(){
+  if(!map) return;
+  Object.values(VEH).forEach(v=>{
+    const show = v.lat!=null && vehVisible(v);
+    if(!show){ if(markers[v.id]){ map.removeLayer(markers[v.id]); delete markers[v.id]; } return; }
+    const col=COLOR[v.type], stale=isStale(v);
+    const html=`<div class="veh-badge ${stale?'stale':''}" style="background:${col}">${vehSVG(v.type)} ${v.label.replace(/[^0-9A-Za-z ]/g,'')}</div>`;
+    const icon=L.divIcon({className:"",html,iconSize:[54,24],iconAnchor:[27,12]});
+    if(markers[v.id]){ markers[v.id].setLatLng([v.lat,v.lng]).setIcon(icon); }
+    else { markers[v.id]=L.marker([v.lat,v.lng],{icon}).addTo(map).bindTooltip(()=>tip(v),{direction:"top",offset:[0,-10]}); }
+  });
+}
+function tip(v){ const s=effStatus(v); return `<b>${v.label}</b> · ${lang==='ta'?(ROUTE[v.route]?.ta):(ROUTE[v.route]?.name)}<br>${statusLabel(s)} · ${t("lastseen")} ${ago(v.ts)}`; }
+function focusVeh(id){ const v=VEH[id]; if(v&&v.lat!=null&&map){ map.setView([v.lat,v.lng],16,{animate:true}); markers[id]?.openTooltip(); } else toast("Shuttle is offline right now","warn"); }
+function renderVehList(){
+  const list=$("veh-list"); if(!list) return;
+  const vs=Object.values(VEH).filter(vehVisible).sort((a,b)=>(a.type>b.type?1:-1)||a.label.localeCompare(b.label));
+  const cnt=$("veh-count"); if(cnt) cnt.textContent="· "+vs.filter(v=>effStatus(v)!=="offline").length+" live";
+  list.innerHTML=vs.map(v=>{
+    const s=effStatus(v), [bg,fg]=statusStyle(s), col=COLOR[v.type];
+    let dist=""; if(userLoc&&v.lat!=null){ const km=haversine(userLoc.lat,userLoc.lng,v.lat,v.lng); const mins=Math.max(1,Math.round(km/0.42)); dist=`<span class="pill" style="background:#EFE7DB;color:#6b3b42">~${mins} ${t("away")}</span>`; }
+    return `<button onclick="focusVeh('${v.id}')" class="card w-full text-left p-3 flex items-center gap-3 ${s!=='offline'?'':'opacity-70'}">
+      <span class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0" style="background:${col}">${vehSVG(v.type)}</span>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2"><span class="font-bold">${v.label}</span><span class="text-[11px] font-semibold px-1.5 py-0.5 rounded" style="background:${col}1a;color:${col}">${v.type==='bus'?t('buses').replace(/s$/,''):t('vans').replace(/s$/,'')}</span></div>
+        <div class="text-[12.5px]" style="color:#9b8b80">${lang==='ta'?(ROUTE[v.route]?.ta):(ROUTE[v.route]?.name)} · ${t("lastseen")} ${ago(v.ts)}</div>
+      </div>
+      ${dist}
+      <span class="pill" style="background:${bg};color:${fg}">${s!=='offline'?'<span class="pulse" style="width:7px;height:7px;border-radius:99px;background:'+fg+';display:inline-block"></span>':''}${statusLabel(s)}</span>
+    </button>`;
+  }).join("");
+}
+function findNearMe(){
+  if(!navigator.geolocation){ toast("Location not supported","err"); return; }
+  toast("Finding your location…","info");
+  navigator.geolocation.getCurrentPosition(p=>{
+    userLoc={lat:p.coords.latitude,lng:p.coords.longitude};
+    if(map){ if(userMarker) map.removeLayer(userMarker);
+      userMarker=L.circleMarker([userLoc.lat,userLoc.lng],{radius:8,color:"#2E7D6F",fillColor:"#2E7D6F",fillOpacity:.9,weight:3}).addTo(map).bindTooltip("You");
+      map.setView([userLoc.lat,userLoc.lng],14);
+    }
+    renderVehList(); toast("Showing distance to each shuttle","ok");
+  },()=>toast("Couldn't get your location","err"),{enableHighAccuracy:true,timeout:8000});
+}
+
+/* ============================================================
+   VIEW: DRIVER (real GPS)
+   ============================================================ */
+let driverState={ unlocked:false, vehicleId:null, watchId:null, lastWrite:0, wakeLock:null, fixes:0 };
+function viewDriver(){
+  if(!driverState.unlocked) return driverGate();
+  if(!driverState.vehicleId) return driverPicker();
+  return driverConsole();
+}
+function driverGate(){
+  return `${header(lang==='ta'?'ஓட்டுநர் பகுதி':'Driver console')}
+  <div class="max-w-md mx-auto px-4 pt-10 pb-28">
+    <div class="card p-6 slidein">
+      <div class="w-12 h-12 rounded-2xl flex items-center justify-center mb-3" style="background:#FBEFD7">🔑</div>
+      <h2 class="disp text-2xl font-bold">Driver access</h2>
+      <p class="text-[14px] mt-1" style="color:#7a6a5c">Enter the driver code from the shuttle coordinator.</p>
+      <input id="dcode" class="field mt-4" type="text" placeholder="Driver code" onkeydown="if(event.key==='Enter')unlockDriver()" />
+      <button onclick="unlockDriver()" class="btn btn-maroon w-full mt-3">Continue</button>
+      ${!window.isSecureContext?`<p class="text-[12px] mt-3" style="color:#B42318">⚠ Live GPS needs an https:// address. Host this file (Netlify, Firebase Hosting, etc.) before driving.</p>`:""}
+    </div>
+  </div>${tabbar("driver")}`;
+}
+function unlockDriver(){ const v=($("dcode")?.value||"").trim(); if(v===CONFIG.driverCode){ driverState.unlocked=true; render(); } else toast("Wrong code","err"); }
+function driverPicker(){
+  return `${header(lang==='ta'?'உங்கள் வாகனத்தைத் தேர்ந்தெடுக்கவும்':'Select your vehicle')}
+  <div class="max-w-2xl mx-auto px-4 pt-4 pb-28">
+    <h2 class="disp text-xl font-bold ${lang==='ta'?'ta':''}">${t("pick")}</h2>
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+      ${VEHICLES.map(v=>{ const col=COLOR[v.type]; const taken=effStatus(VEH[v.id])!=='offline';
+        return `<button onclick="chooseVehicle('${v.id}')" class="card p-4 text-center relative">
+          <span class="w-12 h-12 mx-auto rounded-xl flex items-center justify-center" style="background:${col}">${vehSVG(v.type)}</span>
+          <p class="font-bold mt-2">${v.label}</p>
+          <p class="text-[12px]" style="color:#9b8b80">${lang==='ta'?ROUTE[v.route]?.ta:ROUTE[v.route]?.name}</p>
+          ${taken?`<span class="pill absolute top-2 right-2" style="background:#E4F2EE;color:#1F6E5E">live</span>`:""}
+        </button>`; }).join("")}
+    </div>
+    <p class="text-[12px] mt-4" style="color:#9b8b80">Tip: each driver picks the vehicle they're driving. If a vehicle already shows “live”, another phone may be sharing it.</p>
+  </div>${tabbar("driver")}`;
+}
+function chooseVehicle(id){ driverState.vehicleId=id; render(); }
+function driverConsole(){
+  const v=VEH[driverState.vehicleId], col=COLOR[v.type], sharing=!!driverState.watchId;
+  return `${header(v.label+" · "+(lang==='ta'?ROUTE[v.route]?.ta:ROUTE[v.route]?.name))}
+  <div class="max-w-md mx-auto px-4 pt-4 pb-28">
+    <div class="card p-5 text-center slidein">
+      <span class="w-16 h-16 mx-auto rounded-2xl flex items-center justify-center" style="background:${col}">${vehSVG(v.type)}</span>
+      <h2 class="disp text-2xl font-bold mt-3">${v.label}</h2>
+      <div class="mt-1">${sharing?`<span class="pill" style="background:#E4F2EE;color:#1F6E5E"><span class="pulse" style="width:7px;height:7px;border-radius:99px;background:#1F6E5E;display:inline-block"></span>Sharing live</span>`:`<span class="pill" style="background:#ECE6DB;color:#7A6A5C">Not sharing</span>`}</div>
+
+      <div id="gps-readout" class="mt-4 text-[13px]" style="color:#7a6a5c">${sharing?'Acquiring GPS…':'Press start to share your location with riders.'}</div>
+
+      ${sharing
+        ? `<button onclick="stopDriving()" class="btn btn-stop w-full mt-4">■ ${t("stop")}</button>`
+        : `<button onclick="startDriving()" class="btn btn-maroon w-full mt-4">▶ ${t("start")}</button>`}
+
+      <div class="grid grid-cols-3 gap-2 mt-4">
+        ${[["in_service","In service"],["on_break","Break"],["full","Full"]].map(([s,l])=>{
+          const on=(v.status===s); const [bg,fg]=statusStyle(s);
+          return `<button onclick="setDriverStatus('${s}')" class="py-2 rounded-xl text-[13px] font-bold" style="background:${on?fg:'#fff'};color:${on?'#fff':fg};border:1.5px solid ${fg}">${l}</button>`;
+        }).join("")}
+      </div>
+    </div>
+
+    <div class="card p-4 mt-3 text-[13px]" style="color:#7a6a5c">
+      <p class="font-bold text-ink mb-1">Before you drive</p>
+      <ul class="list-disc pl-5 space-y-1">
+        <li>Keep this screen open; we keep it awake automatically.</li>
+        <li>Plug into a car charger — GPS uses battery.</li>
+        <li>Allow location permission when asked.</li>
+      </ul>
+      <button onclick="driverState.vehicleId=null;render()" class="text-[13px] font-bold mt-3" style="color:#6E1023">← Change vehicle</button>
+    </div>
+  </div>${tabbar("driver")}`;
+}
+async function startDriving(){
+  const id=driverState.vehicleId;
+  if(!navigator.geolocation){ toast("GPS not supported on this device","err"); return; }
+  if(!window.isSecureContext){ toast("Needs https:// to read GPS","err"); return; }
+  try{ if("wakeLock" in navigator){ driverState.wakeLock=await navigator.wakeLock.request("screen"); } }catch(e){}
+  driverState.fixes=0;
+  driverState.watchId=navigator.geolocation.watchPosition(p=>{
+    const now=Date.now(); driverState.fixes++;
+    const lat=p.coords.latitude, lng=p.coords.longitude, heading=p.coords.heading||0, acc=Math.round(p.coords.accuracy||0);
+    const ro=$("gps-readout"); if(ro) ro.innerHTML=`📡 ${lat.toFixed(5)}, ${lng.toFixed(5)} · ±${acc}m · ${driverState.fixes} fixes`;
+    if(now-driverState.lastWrite >= CONFIG.writeIntervalMs || driverState.lastWrite===0){
+      driverState.lastWrite=now;
+      pushVehicle(id,{ lat,lng,heading, status:(VEH[id].status&&VEH[id].status!=='offline')?VEH[id].status:'in_service' });
+    }
+  },err=>{
+    const ro=$("gps-readout"); if(ro) ro.innerHTML=`<span style="color:#B42318">⚠ ${err.code===1?'Location permission denied':'Location error'} — please allow location.</span>`;
+  },{enableHighAccuracy:true,maximumAge:2000,timeout:12000});
+  toast("Sharing your live location","ok"); render();
+}
+function stopDriving(){
+  if(driverState.watchId!=null){ navigator.geolocation.clearWatch(driverState.watchId); driverState.watchId=null; }
+  if(driverState.wakeLock){ try{driverState.wakeLock.release();}catch(e){} driverState.wakeLock=null; }
+  pushVehicle(driverState.vehicleId,{ status:"offline" });
+  toast("Stopped sharing","info"); render();
+}
+function setDriverStatus(s){ const id=driverState.vehicleId; pushVehicle(id,{status:s}); render(); toast("Status: "+statusLabel(s)); }
+
+/* ============================================================
+   VIEW: OPS / ADMIN
+   ============================================================ */
+function viewOps(){
+  const all=Object.values(VEH), liveN=all.filter(v=>effStatus(v)!=='offline').length;
+  return `${header(lang==='ta'?'நிர்வாகக் கண்ணோட்டம்':'Operations overview')}
+  ${modeBanner()}
+  <div class="max-w-2xl mx-auto px-4 pt-4 pb-28">
+    <div class="grid grid-cols-3 gap-3">
+      ${[["Live",liveN,"#2E7D6F"],["Buses",all.filter(v=>v.type==='bus').length,"#6E1023"],["Vans",all.filter(v=>v.type==='van').length,"#C2902B"]].map(([l,n,c])=>`<div class="card p-4 text-center"><p class="disp text-3xl font-bold" style="color:${c}">${n}</p><p class="text-[12px] font-semibold" style="color:#9b8b80">${l}</p></div>`).join("")}
+    </div>
+
+    <div class="card mt-4">
+      <div class="flex items-center justify-between p-3 border-b" style="border-color:rgba(110,16,35,.1)">
+        <h2 class="disp text-lg font-bold">Fleet status</h2>
+        <button onclick="toggleDemo()" class="btn ${demoTimer?'btn-stop':'btn-gold'} py-2 text-[13px]">${demoTimer?'■ Stop demo':'▶ Simulate 8 shuttles'}</button>
+      </div>
+      <div class="divide-y" style="border-color:rgba(110,16,35,.06)">
+        ${Object.values(VEH).sort((a,b)=>a.id.localeCompare(b.id)).map(v=>{
+          const s=effStatus(v),[bg,fg]=statusStyle(s),col=COLOR[v.type];
+          return `<div class="flex items-center gap-3 p-3">
+            <span class="w-9 h-9 rounded-lg flex items-center justify-center shrink-0" style="background:${col}">${vehSVG(v.type)}</span>
+            <div class="flex-1 min-w-0">
+              <p class="font-bold text-[15px]">${v.label} <span class="font-normal text-[12px]" style="color:#9b8b80">· ${lang==='ta'?ROUTE[v.route]?.ta:ROUTE[v.route]?.name}</span></p>
+              <p class="text-[12px]" style="color:#9b8b80">${v.lat!=null?v.lat.toFixed(4)+', '+v.lng.toFixed(4):'no fix'} · ${t("lastseen")} ${ago(v.ts)}</p>
+            </div>
+            <span class="pill" style="background:${bg};color:${fg}">${statusLabel(s)}</span>
+            <button onclick="opsToggle('${v.id}')" class="text-[12px] font-bold px-2 py-1 rounded-lg" style="border:1.5px solid rgba(110,16,35,.2);color:#6E1023">${s==='offline'?'Set live':'Set off'}</button>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>
+
+    <div class="card p-4 mt-4 text-[13px]" style="color:#7a6a5c">
+      <p class="font-bold text-ink">Status: ${CONFIGURED?'<span style="color:#1F6E5E">Firebase connected — live across devices</span>':'<span style="color:#B42318">Demo mode — local only</span>'}</p>
+      <p class="mt-1">Share the riders link / QR with attendees, and the driver code <b>${CONFIG.driverCode}</b> with your 8 drivers.</p>
+    </div>
+  </div>${tabbar("ops")}`;
+}
+function opsToggle(id){ const v=VEH[id]; const s=effStatus(v); if(s==='offline'){ const h=CONFIG.hub; pushVehicle(id,{lat:h.lat+(Math.random()-.5)*.01,lng:h.lng+(Math.random()-.5)*.01,status:'in_service'}); } else pushVehicle(id,{status:'offline'}); render(); }
+
+/* demo simulator — animates all 8 vehicles (writes to Firebase if connected) */
+function toggleDemo(){
+  if(demoTimer){ clearInterval(demoTimer); demoTimer=null; render(); toast("Demo stopped","info"); return; }
+  const h=CONFIG.hub;
+  Object.values(VEH).forEach((v,i)=>{ v._sx=h.lat+(Math.random()-.5)*.02; v._sy=h.lng+(Math.random()-.5)*.02; v._vx=(Math.random()-.5)*.0008; v._vy=(Math.random()-.5)*.0008; });
+  demoTimer=setInterval(()=>{
+    Object.values(VEH).forEach(v=>{
+      v._sx=(v._sx||h.lat)+v._vx; v._sy=(v._sy||h.lng)+v._vy;
+      if(haversine(v._sx,v._sy,h.lat,h.lng)>2.2){ v._vx*=-1; v._vy*=-1; }
+      if(Math.random()<.03){ v._vx=(Math.random()-.5)*.0008; v._vy=(Math.random()-.5)*.0008; }
+      pushVehicle(v.id,{ lat:v._sx, lng:v._sy, status:(Math.random()<.08?'full':'in_service') });
+    });
+  },2500);
+  render(); toast("Simulating 8 shuttles","ok");
+}
+
+/* ============================================================
+   Re-render helpers (update live bits without rebuilding view)
+   ============================================================ */
+function rerenderLive(){
+  const route=(location.hash.replace("#","")||"riders");
+  if(route==="riders"){ renderMarkers(); renderVehList(); }
+  else if(route==="ops"){ /* light: rebuild ops only */ const a=$("app"); if(a&&a.dataset.view==='ops'){ /* avoid clobbering: just refresh on next tick */ } }
+}
+setInterval(()=>{ // keep "last seen" + stale styling fresh
+  const route=(location.hash.replace("#","")||"riders");
+  if(route==="riders"){ renderMarkers(); renderVehList(); }
+}, 5000);
+
+/* ============================================================
+   Router
+   ============================================================ */
+function teardown(){ if(map){ map.remove(); map=null; markers={}; } }
+function render(){
+  const route=(location.hash.replace("#","")||"riders");
+  teardown();
+  const views={ riders:viewRiders, driver:viewDriver, ops:viewOps };
+  $("app").innerHTML=(views[route]||viewRiders)();
+  $("app").dataset.view=route;
+  if(route==="riders"){ setTimeout(()=>{ initMap(); renderVehList(); },50); }
+}
+window.addEventListener("hashchange",render);
+window.addEventListener("DOMContentLoaded",render);
+render();
+</script>
+</body>
+</html>

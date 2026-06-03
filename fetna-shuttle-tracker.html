@@ -8,9 +8,8 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700;9..144,800&family=Hanken+Grotesk:wght@400;500;600;700&family=Noto+Sans+Tamil:wght@500;600;700&display=swap" rel="stylesheet" />
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<!-- Firebase (compat build = simple globals, no bundler needed) -->
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<!-- Socket.io client (connects to your own tiny relay server — no database) -->
+<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 <script>
 tailwind.config = { theme: { extend: {
   colors: { maroon:"#6E1023", maroon2:"#8A1C2B", gold:"#C2902B", gold2:"#E3B23C",
@@ -57,7 +56,7 @@ tailwind.config = { theme: { extend: {
 <script>
 /* ============================================================
    FeTNA 2026 — SHUTTLE TRACKER
-   Single-file app · real GPS via Firebase · Leaflet map
+   Single-file app · real GPS via Socket.io relay · Leaflet map
    ── EDIT THE CONFIG BELOW, then deploy to any HTTPS host ──
    ============================================================ */
 
@@ -71,16 +70,11 @@ const CONFIG = {
   writeIntervalMs: 3500,     // how often a driver phone pushes its location
 };
 
-/* 2) FIREBASE CONFIG  (paste yours from the Firebase console) ---- */
-const firebaseConfig = {
-  apiKey:            "PASTE_API_KEY",
-  authDomain:        "PASTE_PROJECT.firebaseapp.com",
-  databaseURL:       "https://PASTE_PROJECT-default-rtdb.firebaseio.com",
-  projectId:         "PASTE_PROJECT",
-  storageBucket:     "PASTE_PROJECT.appspot.com",
-  messagingSenderId: "PASTE_SENDER_ID",
-  appId:             "PASTE_APP_ID",
-};
+/* 2) RELAY SERVER  ----------------------------------------------- */
+/*  Paste the https URL of your own Socket.io relay (server.js).    */
+/*  Free hosts: Render / Railway / Fly.io / Glitch. Must be https.  */
+/*  Leave as PASTE_… to run in local demo mode.                     */
+const SERVER_URL = "http://172.20.10.2:3000";   // e.g. "https://fetna-relay.onrender.com"
 
 /* 3) ROUTES (edit freely once organizers confirm loops) --------- */
 const ROUTES = [
@@ -111,12 +105,34 @@ const VEHICLES = [
 ];
 
 /* ============================================================
-   Boot / state
+   Boot / state  +  connectivity (Socket.io — your own relay)
    ============================================================ */
 const $=(id)=>document.getElementById(id);
-const CONFIGURED = !firebaseConfig.apiKey.includes("PASTE") && !!window.firebase;
-let db=null;
-if(CONFIGURED){ try{ firebase.initializeApp(firebaseConfig); db=firebase.database(); }catch(e){ console.warn(e); } }
+const CONFIGURED = !SERVER_URL.includes("PASTE") && !!window.io;
+let socket=null;
+const net={ configured:CONFIGURED, connected:false, lastError:null, lastWriteOk:0, mixed:false };
+
+// Block the classic mistake: https page → http server is blocked by the browser.
+if(CONFIGURED && location.protocol==="https:" && SERVER_URL.startsWith("http://")){
+  net.mixed=true; net.lastError="Page is https but SERVER_URL is http:// (browser blocks this). Use an https:// relay URL.";
+}
+
+if(CONFIGURED && !net.mixed){
+  try{
+    socket=io(SERVER_URL,{ transports:["websocket","polling"], reconnection:true });
+    socket.on("connect",()=>{ net.connected=true; net.lastError=null; socket.emit("getSnapshot"); updateStatusPills(); });
+    socket.on("disconnect",()=>{ net.connected=false; updateStatusPills(); });
+    socket.on("connect_error",(e)=>{ net.lastError=(e&&e.message)||"connect_error"; net.connected=false; updateStatusPills(); });
+    // server pushes either a full snapshot or single-vehicle updates
+    socket.on("snapshot",(data)=>{ if(data) Object.keys(data).forEach(id=>mergeVehicle(data[id])); rerenderLive(); });
+    socket.on("vehicle",(rec)=>{ mergeVehicle(rec); rerenderLive(); });
+  }catch(e){ net.lastError=(e&&e.message)||String(e); }
+}
+function mergeVehicle(rec){
+  if(!rec||!rec.id||!VEH[rec.id]) return;
+  const cfg=VEHICLES.find(v=>v.id===rec.id)||{};
+  VEH[rec.id]={ ...VEH[rec.id], ...cfg, ...rec };
+}
 
 const ROUTE=Object.fromEntries(ROUTES.map(r=>[r.id,r]));
 const COLOR={ bus:"#6E1023", van:"#C2902B" };
@@ -128,6 +144,21 @@ VEHICLES.forEach(v=>VEH[v.id]={ ...v, lat:null, lng:null, heading:0, status:"off
 let lang = localStorage.getItem("fetna_lang") || "en";
 let routeFilter = "all";
 let demoTimer=null;
+
+/* connection status helpers ---------------------------------- */
+function connState(){
+  if(!net.configured) return {key:"local", label:"Local only", dot:"#B42318", desc:"No relay set — locations stay on this device."};
+  if(net.mixed)       return {key:"error", label:"Config error", dot:"#B42318", desc:net.lastError};
+  if(net.connected)   return {key:"live", label:"Live", dot:"#2E7D6F", desc:"Connected to relay — locations sync across devices."};
+  if(net.lastError)   return {key:"error", label:"No connection", dot:"#B42318", desc:net.lastError};
+  return {key:"connecting", label:"Connecting…", dot:"#C2902B", desc:"Reaching the relay server…"};
+}
+function statusPill(){
+  const c=connState();
+  return `<button onclick="openDiag()" class="flex items-center gap-1.5 text-[11px] font-bold rounded-full px-2.5 py-1" style="background:rgba(255,255,255,.14);border:1px solid rgba(227,178,60,.4);color:#fff">
+    <span style="width:8px;height:8px;border-radius:99px;background:${c.dot};${c.key==='live'?'box-shadow:0 0 0 3px '+c.dot+'33':''}"></span>${c.label}</button>`;
+}
+function updateStatusPills(){ document.querySelectorAll("[data-statuspill]").forEach(el=>{ el.outerHTML=`<span data-statuspill>${statusPill()}</span>`; }); }
 
 /* i18n (English always present; toggle switches primary labels) */
 const T={
@@ -164,23 +195,79 @@ function vehSVG(type){ return type==="bus"
   : `<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 7h11l4 4v6H3z" fill="#fff"/><rect x="5" y="9" width="6" height="4" fill="${'#C2902B'}"/><circle cx="7.5" cy="18.5" r="2" fill="#fff"/><circle cx="16" cy="18.5" r="2" fill="#fff"/></svg>`; }
 
 /* ============================================================
-   Firebase live subscription
+   Live updates arrive via Socket.io events (see boot section).
    ============================================================ */
-if(db){
-  db.ref("vehicles").on("value",(snap)=>{
-    const data=snap.val()||{};
-    VEHICLES.forEach(cfg=>{
-      const live=data[cfg.id];
-      VEH[cfg.id] = live ? { ...cfg, ...live } : { ...VEH[cfg.id], ...cfg };
-    });
-    rerenderLive();
-  });
-}
 function pushVehicle(id, patch){
   const rec={ ...VEH[id], ...patch, ts:Date.now() };
+  delete rec._sx; delete rec._sy; delete rec._vx; delete rec._vy; // don't transmit sim helpers
   VEH[id]=rec;
-  if(db){ db.ref("vehicles/"+id).update(rec).catch(()=>{}); }
+  if(socket && net.connected){
+    const slim={ id:rec.id, label:rec.label, type:rec.type, route:rec.route, lat:rec.lat, lng:rec.lng, heading:rec.heading, status:rec.status, ts:rec.ts };
+    socket.emit("update", slim, (ack)=>{ if(ack&&ack.ok){ net.lastWriteOk=Date.now(); updateStatusPills(); } });
+    net.lastWriteOk=Date.now();
+  }
   rerenderLive();
+}
+
+/* ---- diagnostics overlay (the key debugging tool) ---- */
+function openDiag(){
+  const c=connState();
+  const httpsPage=location.protocol==="https:";
+  const rootHtml=`
+  <div id="diag" style="position:fixed;inset:0;z-index:4000;background:rgba(42,18,22,.5);display:flex;align-items:flex-end;justify-content:center" onclick="if(event.target===this)closeDiag()">
+    <div class="slidein" style="background:#FBF5E9;width:100%;max-width:560px;border-radius:18px 18px 0 0;max-height:88vh;overflow:auto">
+      <div class="topband text-white px-5 py-4 flex items-center justify-between" style="border-radius:18px 18px 0 0">
+        <h2 class="disp text-xl font-bold">Connection status</h2>
+        <button onclick="closeDiag()" style="font-size:22px;line-height:1">×</button>
+      </div>
+      <div class="p-5">
+        <div class="card p-4 flex items-center gap-3">
+          <span style="width:14px;height:14px;border-radius:99px;background:${c.dot}"></span>
+          <div><p class="font-bold">${c.label}</p><p class="text-[13px]" style="color:#7a6a5c">${c.desc}</p></div>
+        </div>
+
+        <div class="card p-4 mt-3 text-[13.5px]" style="color:#42282c">
+          <p class="flex justify-between"><span>Relay URL set</span><b style="color:${net.configured?'#1F6E5E':'#B42318'}">${net.configured?'Yes':'No'}</b></p>
+          <p class="flex justify-between mt-1"><span>Page secure (https)</span><b style="color:${httpsPage?'#1F6E5E':'#9b8b80'}">${httpsPage?'Yes':'No (file/local)'}</b></p>
+          <p class="flex justify-between mt-1"><span>Socket connected</span><b style="color:${net.connected?'#1F6E5E':'#B42318'}">${net.connected?'Yes':'No'}</b></p>
+          <p class="flex justify-between mt-1"><span>Last update sent</span><b>${net.lastWriteOk?ago(net.lastWriteOk)+' ago':'never'}</b></p>
+          <p class="flex justify-between mt-1"><span>Relay</span><b style="font-size:11px;word-break:break-all">${net.configured?SERVER_URL:'—'}</b></p>
+          ${net.lastError?`<p class="mt-2 p-2 rounded" style="background:#FBE3E3;color:#B42318"><b>Error:</b> ${net.lastError}</p>`:""}
+        </div>
+
+        <button onclick="testConn()" class="btn btn-maroon w-full mt-3">🧪 Test connection</button>
+        <div id="diag-test" class="text-[13px] mt-2 text-center" style="color:#7a6a5c"></div>
+
+        ${(c.key!=="live")?`
+        <div class="card p-4 mt-4 text-[13px]" style="color:#42282c">
+          <p class="disp font-bold text-base mb-2">How to enable cross-device tracking</p>
+          <ol class="list-decimal pl-5 space-y-1.5">
+            <li>Deploy the tiny <b>relay server</b> I gave you (<code>server.js</code> + <code>package.json</code>) to a free host — Render, Railway, Fly.io, or Glitch. No database needed.</li>
+            <li>Copy the <b>https URL</b> it gives you (e.g. <code>https://fetna-relay.onrender.com</code>).</li>
+            <li>Paste it into <code>SERVER_URL</code> near the top of this HTML file.</li>
+            <li>Re-upload to GitHub Pages, hard-refresh both phones. The pill should turn <b style="color:#1F6E5E">green</b>.</li>
+          </ol>
+          <p class="mt-2 text-[12px]" style="color:#9b8b80">The relay keeps positions in memory only — nothing is stored in any database.</p>
+        </div>`:`<p class="text-center text-[13px] mt-4" style="color:#1F6E5E">✓ Connected. A driver who taps “Start sharing” will appear on every device.</p>`}
+      </div>
+    </div>
+  </div>`;
+  const wrap=document.createElement("div"); wrap.innerHTML=rootHtml; document.body.appendChild(wrap.firstElementChild);
+}
+function closeDiag(){ $("diag")?.remove(); }
+function testConn(){
+  const out=$("diag-test");
+  if(!net.configured){ if(out) out.innerHTML='<span style="color:#B42318">No relay URL set — paste your server URL into SERVER_URL.</span>'; return; }
+  if(!socket){ if(out) out.innerHTML='<span style="color:#B42318">Socket not created (check SERVER_URL / mixed-content).</span>'; return; }
+  if(out) out.textContent="Pinging relay…";
+  let done=false;
+  const to=setTimeout(()=>{ if(!done&&out) out.innerHTML='<span style="color:#B42318">✗ No response. Relay may be asleep (free hosts nap) or URL is wrong. Open the URL in a browser to wake it, then retry.</span>'; },5000);
+  socket.timeout(4500).emit("ping", Date.now(), (err,serverTs)=>{
+    done=true; clearTimeout(to);
+    if(err){ if(out) out.innerHTML='<span style="color:#B42318">✗ '+(err.message||'timeout')+'</span>'; return; }
+    net.lastWriteOk=Date.now(); updateStatusPills();
+    if(out) out.innerHTML='<span style="color:#1F6E5E">✓ Relay responded — cross-device sync is working!</span>';
+  });
 }
 
 /* ============================================================
@@ -216,18 +303,22 @@ function header(sub){
           <h1 class="disp text-[20px] font-bold leading-tight">FeTNA <span class="${lang==='ta'?'ta':''}">${t("title")}</span></h1>
         </div>
       </div>
-      <button onclick="setLang('${lang==='en'?'ta':'en'}')" class="text-xs font-bold rounded-lg px-2.5 py-1.5" style="background:rgba(255,255,255,.14);border:1px solid rgba(227,178,60,.4)">${lang==='en'?'தமிழ்':'EN'}</button>
+      <div class="flex items-center gap-2">
+        <span data-statuspill>${statusPill()}</span>
+        <button onclick="setLang('${lang==='en'?'ta':'en'}')" class="text-xs font-bold rounded-lg px-2.5 py-1.5" style="background:rgba(255,255,255,.14);border:1px solid rgba(227,178,60,.4)">${lang==='en'?'தமிழ்':'EN'}</button>
+      </div>
     </div>
     ${sub?`<div class="max-w-2xl mx-auto px-4 pb-2 -mt-1 text-[12.5px]" style="color:#f3dcc0">${sub}</div>`:""}
     <div class="gold-rule"></div>
   </div>`;
 }
 function modeBanner(){
-  if(CONFIGURED) return "";
-  return `<div class="max-w-2xl mx-auto px-4 mt-3"><div class="card p-3 flex items-start gap-3" style="border-color:rgba(194,144,43,.4);background:#FBEFD7">
-    <span class="text-xl">⚙️</span>
-    <div class="text-[13px]"><b>Demo mode.</b> Firebase isn't configured yet, so locations stay on this device only. Use Ops → “Simulate 8 shuttles” to demo. To go live across phones, paste your Firebase config in the file (see notes I'll give you).</div>
-  </div></div>`;
+  if(net.configured && net.connected) return "";
+  const msg = !net.configured
+    ? `<b>Not syncing across devices.</b> No relay server is set, so a driver's location only shows on their own phone. <u>Tap here to set it up</u>.`
+    : `<b>Connecting to relay…</b> If this stays red, the relay may be asleep or the URL is wrong. <u>Tap to check</u>.`;
+  return `<div class="max-w-2xl mx-auto px-4 mt-3"><button onclick="openDiag()" class="card p-3 flex items-start gap-3 w-full text-left" style="border-color:rgba(180,35,24,.4);background:#FBE3E3">
+    <span class="text-xl">⚠️</span><div class="text-[13px]">${msg}</div></button></div>`;
 }
 
 /* ============================================================
@@ -333,7 +424,7 @@ function driverGate(){
       <p class="text-[14px] mt-1" style="color:#7a6a5c">Enter the driver code from the shuttle coordinator.</p>
       <input id="dcode" class="field mt-4" type="text" placeholder="Driver code" onkeydown="if(event.key==='Enter')unlockDriver()" />
       <button onclick="unlockDriver()" class="btn btn-maroon w-full mt-3">Continue</button>
-      ${!window.isSecureContext?`<p class="text-[12px] mt-3" style="color:#B42318">⚠ Live GPS needs an https:// address. Host this file (Netlify, Firebase Hosting, etc.) before driving.</p>`:""}
+      ${!window.isSecureContext?`<p class="text-[12px] mt-3" style="color:#B42318">⚠ Live GPS needs an https:// address. Host this file (GitHub Pages, Netlify, etc.) before driving.</p>`:""}
     </div>
   </div>${tabbar("driver")}`;
 }
@@ -406,7 +497,10 @@ async function startDriving(){
   },err=>{
     const ro=$("gps-readout"); if(ro) ro.innerHTML=`<span style="color:#B42318">⚠ ${err.code===1?'Location permission denied':'Location error'} — please allow location.</span>`;
   },{enableHighAccuracy:true,maximumAge:2000,timeout:12000});
-  toast("Sharing your live location","ok"); render();
+  toast("Sharing your live location","ok");
+  if(!net.configured){ toast("⚠ Local only — not reaching other phones. Tap the status pill to set up the relay.","warn"); }
+  else if(!net.connected){ toast("Relay not connected yet — tap the status pill to check.","info"); }
+  render();
 }
 function stopDriving(){
   if(driverState.watchId!=null){ navigator.geolocation.clearWatch(driverState.watchId); driverState.watchId=null; }
@@ -450,14 +544,14 @@ function viewOps(){
     </div>
 
     <div class="card p-4 mt-4 text-[13px]" style="color:#7a6a5c">
-      <p class="font-bold text-ink">Status: ${CONFIGURED?'<span style="color:#1F6E5E">Firebase connected — live across devices</span>':'<span style="color:#B42318">Demo mode — local only</span>'}</p>
+      <p class="font-bold text-ink">Status: ${net.connected?'<span style="color:#1F6E5E">Relay connected — live across devices</span>':(net.configured?'<span style="color:#B42318">Relay set, not connected — tap status pill</span>':'<span style="color:#B42318">Demo mode — local only</span>')}</p>
       <p class="mt-1">Share the riders link / QR with attendees, and the driver code <b>${CONFIG.driverCode}</b> with your 8 drivers.</p>
     </div>
   </div>${tabbar("ops")}`;
 }
 function opsToggle(id){ const v=VEH[id]; const s=effStatus(v); if(s==='offline'){ const h=CONFIG.hub; pushVehicle(id,{lat:h.lat+(Math.random()-.5)*.01,lng:h.lng+(Math.random()-.5)*.01,status:'in_service'}); } else pushVehicle(id,{status:'offline'}); render(); }
 
-/* demo simulator — animates all 8 vehicles (writes to Firebase if connected) */
+/* demo simulator — animates all 8 vehicles (broadcasts via relay if connected) */
 function toggleDemo(){
   if(demoTimer){ clearInterval(demoTimer); demoTimer=null; render(); toast("Demo stopped","info"); return; }
   const h=CONFIG.hub;
